@@ -100,6 +100,7 @@ def _codex_sync(codex_body, model):
     text_parts = []
     tool_calls = []
     current_tool = None
+    has_function_calls = False
     usage = {}
 
     for etype, data in codex.stream(codex_body):
@@ -113,11 +114,19 @@ def _codex_sync(codex_body, model):
         elif t == "response.output_item.added":
             item = data.get("item", {})
             if item.get("type") == "function_call":
+                has_function_calls = True
                 current_tool = {"id": item.get("call_id", f"call_{uuid.uuid4().hex[:24]}"), "type": "function", "function": {"name": item.get("name", ""), "arguments": ""}}
                 tool_calls.append(current_tool)
         elif t == "response.function_call_arguments.delta":
             if current_tool:
                 current_tool["function"]["arguments"] += data.get("delta", "")
+        elif t == "response.output_item.done":
+            item = data.get("item", {})
+            if item.get("type") == "web_search_call":
+                action = item.get("action", {})
+                query = action.get("query", "")
+                queries = action.get("queries", [])
+                tool_calls.append({"id": item.get("id", f"ws_{uuid.uuid4().hex[:24]}"), "type": "function", "function": {"name": "web_search", "arguments": json.dumps({"query": query, "queries": queries}, ensure_ascii=False)}})
         elif t == "response.completed":
             usage = data.get("response", {}).get("usage", {})
 
@@ -125,13 +134,14 @@ def _codex_sync(codex_body, model):
     if tool_calls:
         message["tool_calls"] = tool_calls
 
-    return jsonify(_build_response(model, message, usage, "tool_calls" if tool_calls else "stop"))
+    return jsonify(_build_response(model, message, usage, "tool_calls" if has_function_calls else "stop"))
 
 
 def _codex_stream(codex_body, model):
     def generate():
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         tool_calls_by_item = {}
+        has_function_calls = False
         tool_index = 0
 
         for etype, data in codex.stream(codex_body):
@@ -150,6 +160,7 @@ def _codex_stream(codex_body, model):
             elif t == "response.output_item.added":
                 item = data.get("item", {})
                 if item.get("type") == "function_call":
+                    has_function_calls = True
                     item_id = item.get("id", "")
                     tool_calls_by_item[item_id] = tool_index
                     yield _sse(chat_id, model, {"tool_calls": [{"index": tool_index, "id": item.get("call_id", ""), "type": "function", "function": {"name": item.get("name", ""), "arguments": ""}}]})
@@ -162,8 +173,18 @@ def _codex_stream(codex_body, model):
                     if delta:
                         yield _sse(chat_id, model, {"tool_calls": [{"index": idx, "function": {"arguments": delta}}]})
 
+            elif t == "response.output_item.done":
+                item = data.get("item", {})
+                if item.get("type") == "web_search_call":
+                    tool_id = item.get("id", f"ws_{uuid.uuid4().hex[:24]}")
+                    action = item.get("action", {})
+                    query = action.get("query", "")
+                    queries = action.get("queries", [])
+                    yield _sse(chat_id, model, {"tool_calls": [{"index": tool_index, "id": tool_id, "type": "function", "function": {"name": "web_search", "arguments": json.dumps({"query": query, "queries": queries}, ensure_ascii=False)}}]})
+                    tool_index += 1
+
             elif t == "response.completed":
-                finish = "tool_calls" if tool_calls_by_item else "stop"
+                finish = "tool_calls" if has_function_calls else "stop"
                 yield _sse(chat_id, model, {}, finish, data.get("response", {}).get("usage", {}))
 
         yield "data: [DONE]\n\n"
@@ -286,7 +307,7 @@ def _claude_sync(claude_body, model, account):
     for block in data.get("content", []):
         if block.get("type") == "text":
             content_text += block["text"]
-        elif block.get("type") == "tool_use":
+        elif block.get("type") in ("tool_use", "server_tool_use"):
             tool_calls.append({"id": block["id"], "type": "function", "function": {"name": block["name"], "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)}})
 
     message = {"role": "assistant", "content": content_text or None}
@@ -294,7 +315,9 @@ def _claude_sync(claude_body, model, account):
         message["tool_calls"] = tool_calls
 
     usage = data.get("usage", {})
-    return jsonify(_build_response(model, message, {"input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0)}, "tool_calls" if tool_calls else "stop"))
+    stop_reason = data.get("stop_reason", "end_turn")
+    finish = "tool_calls" if stop_reason == "tool_use" else "stop"
+    return jsonify(_build_response(model, message, {"input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0)}, finish))
 
 
 def _claude_stream(claude_body, model, account):
@@ -314,6 +337,7 @@ def _claude_stream(claude_body, model, account):
 
         account.mark_success()
         tool_index = 0
+        current_block_type = None
         current_tool_id = None
 
         for line in resp.iter_lines():
@@ -334,7 +358,8 @@ def _claude_stream(claude_body, model, account):
 
             if etype == "content_block_start":
                 block = event.get("content_block", {})
-                if block.get("type") == "tool_use":
+                current_block_type = block.get("type")
+                if current_block_type in ("tool_use", "server_tool_use"):
                     current_tool_id = block.get("id", "")
                     yield _sse(chat_id, model, {"tool_calls": [{"index": tool_index, "id": current_tool_id, "type": "function", "function": {"name": block.get("name", ""), "arguments": ""}}]})
                     tool_index += 1
@@ -345,10 +370,13 @@ def _claude_stream(claude_body, model, account):
                     text = delta.get("text", "")
                     if text:
                         yield _sse(chat_id, model, {"content": text})
-                elif delta.get("type") == "input_json_delta":
+                elif delta.get("type") == "input_json_delta" and current_block_type in ("tool_use", "server_tool_use"):
                     partial = delta.get("partial_json", "")
                     if partial and current_tool_id is not None:
                         yield _sse(chat_id, model, {"tool_calls": [{"index": tool_index - 1, "function": {"arguments": partial}}]})
+
+            elif etype == "content_block_stop":
+                current_block_type = None
 
             elif etype == "message_delta":
                 stop_reason = event.get("delta", {}).get("stop_reason", "end_turn")
@@ -436,6 +464,7 @@ def health():
 
 
 PORT = int(os.environ.get("PORT", 5010))
+
 
 if __name__ == "__main__":
     print("=" * 50)

@@ -1,2 +1,4 @@
 .env
+credentials.json
+codex_credentials.json
 __pycache__/

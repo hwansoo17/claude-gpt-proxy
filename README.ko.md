@@ -96,63 +96,43 @@ print(response.choices[0].message.content)
 ## Docker
 
 ```bash
-docker build -t claude-gpt-proxy .
-docker run -p 5010:5010 \
-  -v ~/.codex:/root/.codex \
-  -v ~/.claude:/root/.claude \
-  claude-gpt-proxy
+docker compose up --build -d
 ```
 
-또는 환경변수로:
+Docker Compose가 호스트의 credential 파일을 컨테이너에 직접 마운트합니다:
 
-```bash
-docker run -p 5010:5010 \
-  -e CLAUDE_OAUTH_TOKEN=sk-ant-oat01-... \
-  -e CLAUDE_OAUTH_REFRESH_TOKEN=sk-ant-ort01-... \
-  claude-gpt-proxy
-```
+- `~/.claude/.credentials.json` → `/app/claude_credentials.json`
+- `~/.codex/auth.json` → `/app/codex_credentials.json`
+
+호스트에서 `claude login`, `npx codex login`만 해두면 `docker compose up`으로 바로 실행됩니다. setup 엔드포인트 호출 없이 로그인 세션의 토큰을 바로 사용하며, 갱신된 토큰은 호스트 파일에 다시 저장됩니다.
 
 ## 인증
 
-### Claude
+사전에 각 서비스에 로그인되어 있어야 합니다:
 
-**토큰 추출 (macOS):**
 ```bash
-# 토큰 확인
-security find-generic-password -s "Claude Code-credentials" -w | python3 -c "
-import sys, json
-oauth = json.loads(sys.stdin.read())['claudeAiOauth']
-print('CLAUDE_OAUTH_TOKEN=' + oauth['accessToken'])
-print('CLAUDE_OAUTH_REFRESH_TOKEN=' + oauth['refreshToken'])
-"
+claude login          # Claude 모델용
+npx codex login       # GPT 모델용
 ```
 
-**토큰 추출 (Linux):**
-```bash
-cat ~/.claude/.credentials.json | python3 -c "
-import sys, json
-oauth = json.loads(sys.stdin.read())['claudeAiOauth']
-print('CLAUDE_OAUTH_TOKEN=' + oauth['accessToken'])
-print('CLAUDE_OAUTH_REFRESH_TOKEN=' + oauth['refreshToken'])
-"
-```
+로그인 후에는 credential이 자동으로 로드됩니다. 별도 설정이 필요 없습니다.
 
-토큰 로딩 우선순위 (높은 순):
+**Claude** — 토큰 로딩 우선순위 (높은 순):
 
 | 순위 | 소스 | 플랫폼 |
 |---|---|---|
 | 1 | `CLAUDE_OAUTH_TOKENS` 환경변수 (멀티) | 모든 |
 | 2 | `CLAUDE_CREDENTIALS_FILES` 파일 경로 (멀티) | 모든 |
 | 3 | `CLAUDE_OAUTH_TOKEN` 환경변수 (단일) | 모든 |
-| 4 | `~/.claude/.credentials.json` 파일 (단일) | Linux |
+| 4 | `CLAUDE_CREDENTIALS_FILE` 파일 (단일) | 모든 |
 | 5 | macOS Keychain (단일) | macOS |
 
-### Codex (GPT)
+**Codex (GPT):**
 
 | 순위 | 소스 | 플랫폼 |
 |---|---|---|
 | 1 | `CODEX_AUTH_FILES` 환경변수 | 모든 |
-| 2 | `~/.codex/auth.json` | 모든 |
+| 2 | `CODEX_AUTH_FILE` 파일 | 모든 |
 
 ## 멀티 계정
 

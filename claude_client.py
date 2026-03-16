@@ -57,10 +57,11 @@ COOLDOWN_SECONDS = float(os.environ.get("CLAUDE_COOLDOWN_SECONDS", "120"))
 class _ClaudeAccount:
     """Single Claude OAuth account."""
 
-    def __init__(self, label, access_token, refresh_token=None):
+    def __init__(self, label, access_token, refresh_token=None, credentials_file=None):
         self.label = label
         self.access_token = access_token
         self.refresh_token = refresh_token
+        self.credentials_file = credentials_file
         self.expires_at = time.time() + 3600
         self.failure_count = 0
         self.disabled_until = 0
@@ -98,11 +99,28 @@ class _ClaudeAccount:
                 if data.get("refresh_token"):
                     self.refresh_token = data["refresh_token"]
                 self.expires_at = time.time() + data.get("expires_in", 3600)
+                self._save_tokens()
                 print(f"[claude] account '{self.label}' token refreshed")
             else:
                 print(f"[claude] account '{self.label}' refresh failed: {resp.status_code}")
         except Exception as e:
             print(f"[claude] account '{self.label}' refresh error: {e}")
+
+    def _save_tokens(self):
+        if not self.credentials_file:
+            return
+        try:
+            with open(self.credentials_file) as f:
+                data = json.load(f)
+            oauth = data.get("claudeAiOauth", {})
+            oauth["accessToken"] = self.access_token
+            oauth["refreshToken"] = self.refresh_token
+            oauth["expiresAt"] = int(self.expires_at * 1000)
+            data["claudeAiOauth"] = oauth
+            with open(self.credentials_file, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
 
 class ClaudeClient:
@@ -183,7 +201,7 @@ class ClaudeClient:
             with open(path) as f:
                 data = json.load(f)
             oauth = data.get("claudeAiOauth", {})
-            acc = _ClaudeAccount(label, oauth.get("accessToken"), oauth.get("refreshToken"))
+            acc = _ClaudeAccount(label, oauth.get("accessToken"), oauth.get("refreshToken"), credentials_file=path)
             acc.expires_at = oauth.get("expiresAt", 0) / 1000
             return acc
         except Exception as e:

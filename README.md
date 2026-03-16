@@ -96,63 +96,43 @@ print(response.choices[0].message.content)
 ## Docker
 
 ```bash
-docker build -t subscription-api-server .
-docker run -p 5010:5010 \
-  -v ~/.codex:/root/.codex \
-  -v ~/.claude:/root/.claude \
-  subscription-api-server
+docker compose up --build -d
 ```
 
-Or with environment variables:
+Docker Compose mounts your host credential files directly into the container:
 
-```bash
-docker run -p 5010:5010 \
-  -e CLAUDE_OAUTH_TOKEN=sk-ant-oat01-... \
-  -e CLAUDE_OAUTH_REFRESH_TOKEN=sk-ant-ort01-... \
-  subscription-api-server
-```
+- `~/.claude/.credentials.json` → `/app/claude_credentials.json`
+- `~/.codex/auth.json` → `/app/codex_credentials.json`
+
+Just `claude login` and `npx codex login` on the host, then `docker compose up`. No setup endpoint needed — tokens are read from your login sessions and refreshed tokens are written back to the host files.
 
 ## Authentication
 
-### Claude
+You must be logged in to each service first:
 
-**Extracting tokens (macOS):**
 ```bash
-# View tokens
-security find-generic-password -s "Claude Code-credentials" -w | python3 -c "
-import sys, json
-oauth = json.loads(sys.stdin.read())['claudeAiOauth']
-print('CLAUDE_OAUTH_TOKEN=' + oauth['accessToken'])
-print('CLAUDE_OAUTH_REFRESH_TOKEN=' + oauth['refreshToken'])
-"
+claude login          # for Claude models
+npx codex login       # for GPT models
 ```
 
-**Extracting tokens (Linux):**
-```bash
-cat ~/.claude/.credentials.json | python3 -c "
-import sys, json
-oauth = json.loads(sys.stdin.read())['claudeAiOauth']
-print('CLAUDE_OAUTH_TOKEN=' + oauth['accessToken'])
-print('CLAUDE_OAUTH_REFRESH_TOKEN=' + oauth['refreshToken'])
-"
-```
+After login, credentials are loaded automatically. No manual setup required.
 
-Token loading priority (highest first):
+**Claude** — token loading priority (highest first):
 
 | Priority | Source | Platform |
 |---|---|---|
 | 1 | `CLAUDE_OAUTH_TOKENS` env var (multi) | Any |
 | 2 | `CLAUDE_CREDENTIALS_FILES` file paths (multi) | Any |
 | 3 | `CLAUDE_OAUTH_TOKEN` env var (single) | Any |
-| 4 | `~/.claude/.credentials.json` file (single) | Linux |
+| 4 | `CLAUDE_CREDENTIALS_FILE` file (single) | Any |
 | 5 | macOS Keychain (single) | macOS |
 
-### Codex (GPT)
+**Codex (GPT):**
 
 | Priority | Source | Platform |
 |---|---|---|
 | 1 | `CODEX_AUTH_FILES` env var | Any |
-| 2 | `~/.codex/auth.json` | Any |
+| 2 | `CODEX_AUTH_FILE` file | Any |
 
 ## Multi-Account
 
