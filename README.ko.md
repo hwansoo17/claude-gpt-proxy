@@ -41,7 +41,6 @@ This Server (localhost:5010)      ──▶  Anthropic API  (Claude)
 | Claude Opus 4.6 | `claude-opus-4-6` | Claude Max |
 | Claude Haiku 4.5 | `claude-haiku-4-5-20251001` | Claude Pro/Max |
 | GPT-5.4 | `gpt-5.4` | ChatGPT Plus/Pro |
-| GPT-5.4 Pro | `gpt-5.4-pro` | ChatGPT Pro |
 | GPT-5.3 Codex | `gpt-5.3-codex` | ChatGPT Plus/Pro |
 | GPT-5.3 Codex Spark | `gpt-5.3-codex-spark` | ChatGPT Pro |
 | GPT-5.2 | `gpt-5.2` | ChatGPT Plus/Pro |
