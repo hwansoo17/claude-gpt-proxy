@@ -34,7 +34,13 @@ CLAUDE_MIN_SYSTEM = [
 
 CLAUDE_MODELS = set(MODEL_CONFIG.keys())
 
-CODEX_MODELS = {"gpt-5.4", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex"}
+CODEX_MODELS = {
+    "gpt-5.4", "gpt-5.4-mini",
+    "gpt-5.3-codex", "gpt-5.3-codex-spark",
+    "gpt-5.2", "gpt-5.2-codex",
+    "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max",
+    "gpt-5", "gpt-5-codex", "gpt-5-codex-mini",
+}
 
 ALL_MODELS = CLAUDE_MODELS | CODEX_MODELS
 
@@ -210,9 +216,21 @@ def _codex_convert_messages(messages):
             if isinstance(content, str) and content:
                 items.append({"type": "message", "role": role, "content": [{"type": text_type, "text": content}]})
             elif isinstance(content, list):
-                parts = [p.get("text", "") for p in content if p.get("type") == "text"]
-                if parts:
-                    items.append({"type": "message", "role": role, "content": [{"type": text_type, "text": "\n".join(parts)}]})
+                # OpenAI content parts → Codex Responses content parts
+                codex_parts = []
+                for p in content:
+                    if not isinstance(p, dict):
+                        continue
+                    pt = p.get("type", "")
+                    if pt == "text":
+                        codex_parts.append({"type": text_type, "text": p.get("text", "")})
+                    elif pt == "image_url":
+                        url = p.get("image_url", {})
+                        if isinstance(url, dict):
+                            url = url.get("url", "")
+                        codex_parts.append({"type": "input_image", "image_url": url})
+                if codex_parts:
+                    items.append({"type": "message", "role": role, "content": codex_parts})
     return items
 
 
@@ -411,7 +429,31 @@ def _claude_convert_messages(messages):
             if isinstance(content, str) and content:
                 result.append({"role": role, "content": content})
             elif isinstance(content, list):
-                result.append({"role": role, "content": content})
+                # OpenAI content parts → Claude content parts
+                claude_parts = []
+                for p in content:
+                    if not isinstance(p, dict):
+                        continue
+                    pt = p.get("type", "")
+                    if pt == "text":
+                        claude_parts.append({"type": "text", "text": p.get("text", "")})
+                    elif pt == "image_url":
+                        url = p.get("image_url", {})
+                        if isinstance(url, dict):
+                            url = url.get("url", "")
+                        if url.startswith("data:"):
+                            # data:image/jpeg;base64,... → Claude base64 형식
+                            header, _, b64data = url.partition(",")
+                            media_type = header.split(";")[0].replace("data:", "")
+                            claude_parts.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64data}})
+                        else:
+                            # URL 직접 전달
+                            claude_parts.append({"type": "image", "source": {"type": "url", "url": url}})
+                    else:
+                        # 알 수 없는 타입은 그대로 전달
+                        claude_parts.append(p)
+                if claude_parts:
+                    result.append({"role": role, "content": claude_parts})
     return result
 
 
@@ -449,6 +491,7 @@ def _sse(chat_id, model, delta, finish_reason=None, usage=None):
             "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
         }
     return f"data: {json.dumps(chunk)}\n\n"
+
 
 
 @app.route("/v1/models", methods=["GET"])
