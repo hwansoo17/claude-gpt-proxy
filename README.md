@@ -148,7 +148,14 @@ Docker Compose mounts your host credential files directly into the container:
 - `~/.claude/.credentials.json` → `/app/claude_credentials.json`
 - `~/.codex/auth.json` → `/app/codex_credentials.json`
 
-Just `claude login` and `npx codex login` on the host, then `docker compose up`. No setup endpoint needed — tokens are read from your login sessions and refreshed tokens are written back to the host files.
+Set the container paths in your `.env` file:
+
+```env
+CLAUDE_CREDENTIALS_FILE=/app/claude_credentials.json
+CODEX_AUTH_FILE=/app/codex_credentials.json
+```
+
+Just `claude login` and `npx codex login` on the host, then `docker compose up`. Refreshed tokens are written back to the host files.
 
 ## Authentication
 
@@ -181,6 +188,8 @@ After login, credentials are loaded automatically. No manual setup required.
 ## Multi-Account
 
 Distribute requests across multiple subscription accounts via round-robin.
+
+### Claude Multi-Account
 
 **Option A: Token env vars**
 ```env
