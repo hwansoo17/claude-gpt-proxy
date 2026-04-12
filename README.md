@@ -61,8 +61,8 @@ npx codex login
 ### 2. Install & run
 
 ```bash
-git clone https://github.com/hwansoo17/claude-gpt-proxy.git
-cd claude-gpt-proxy
+git clone https://github.com/hwansoo17/gpt-proxy.git
+cd gpt-proxy
 pip install -r requirements.txt
 cp .env.example .env
 python3 server.py
