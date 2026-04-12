@@ -6,6 +6,5 @@ services:
     env_file:
       - .env
     volumes:
-      - ~/.claude/.credentials.json:/app/claude_credentials.json
       - ~/.codex/auth.json:/app/codex_credentials.json
     restart: unless-stopped

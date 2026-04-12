@@ -1,6 +1,7 @@
 """
 Codex API client via direct HTTP (OAuth).
 Supports multi-account with round-robin and failover.
+Docker 환경에서도 토큰 갱신이 정상 동작하도록 설계.
 """
 
 import json
@@ -16,18 +17,26 @@ CLIENT_ID = os.environ.get("CODEX_CLIENT_ID", "app_EMoamEEZ73f0CkXaXp7hrann")
 MAX_FAILURES = int(os.environ.get("CODEX_MAX_FAILURES", "3"))
 COOLDOWN_SECONDS = float(os.environ.get("CODEX_COOLDOWN_SECONDS", "120"))
 
+# 토큰 만료 전 갱신 여유 시간 (초)
+REFRESH_MARGIN = int(os.environ.get("CODEX_REFRESH_MARGIN", "300"))
+
+# 백그라운드 토큰 갱신 주기 (초, 기본 30분)
+KEEPALIVE_INTERVAL = int(os.environ.get("CODEX_KEEPALIVE_INTERVAL", "1800"))
+
 
 class _CodexAccount:
     """Single Codex OAuth account."""
 
-    def __init__(self, label, access_token, refresh_token=None, auth_file=None):
+    def __init__(self, label, access_token, refresh_token=None, auth_file=None, expires_at=None):
         self.label = label
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.auth_file = auth_file
-        self.expires_at = time.time() + 86400 * 10
+        # auth.json에 expires_at이 있으면 사용, 없으면 1시간 후 갱신 시도
+        self.expires_at = expires_at or (time.time() + 3600)
         self.failure_count = 0
         self.disabled_until = 0
+        self._refresh_lock = threading.Lock()
 
     @property
     def is_available(self):
@@ -42,50 +51,76 @@ class _CodexAccount:
     def mark_success(self):
         self.failure_count = 0
 
-    def refresh_if_needed(self):
+    def ensure_valid_token(self):
+        """토큰이 만료 임박하면 갱신. 401 발생 시 강제 갱신용으로도 사용."""
         if not self.refresh_token:
             return
-        if time.time() < self.expires_at - 300:
+        if time.time() < self.expires_at - REFRESH_MARGIN:
             return
-        try:
-            resp = requests.post(TOKEN_URL, data={
-                "grant_type": "refresh_token",
-                "refresh_token": self.refresh_token,
-                "client_id": CLIENT_ID,
-                "scope": "openid profile email offline_access",
-            }, headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            }, timeout=10)
-            if resp.ok:
-                tokens = resp.json()
-                self.access_token = tokens["access_token"]
-                if tokens.get("refresh_token"):
-                    self.refresh_token = tokens["refresh_token"]
-                self.expires_at = time.time() + tokens.get("expires_in", 86400)
-                self._save_tokens()
-                print(f"[codex] account '{self.label}' token refreshed")
-            else:
-                print(f"[codex] account '{self.label}' refresh failed: {resp.status_code}")
-        except Exception as e:
-            print(f"[codex] account '{self.label}' refresh error: {e}")
+        self._do_refresh()
+
+    def force_refresh(self):
+        """401 등으로 토큰이 유효하지 않을 때 강제 갱신."""
+        if not self.refresh_token:
+            return False
+        return self._do_refresh()
+
+    def _do_refresh(self):
+        with self._refresh_lock:
+            # 다른 스레드가 이미 갱신했을 수 있으므로 재확인
+            if time.time() < self.expires_at - REFRESH_MARGIN:
+                return True
+            try:
+                resp = requests.post(TOKEN_URL, data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.refresh_token,
+                    "client_id": CLIENT_ID,
+                    "scope": "openid profile email offline_access",
+                }, headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                }, timeout=15)
+                if resp.ok:
+                    tokens = resp.json()
+                    self.access_token = tokens["access_token"]
+                    if tokens.get("refresh_token"):
+                        self.refresh_token = tokens["refresh_token"]
+                    self.expires_at = time.time() + tokens.get("expires_in", 86400)
+                    self._save_tokens()
+                    print(f"[codex] account '{self.label}' token refreshed (expires in {tokens.get('expires_in', '?')}s)")
+                    return True
+                else:
+                    print(f"[codex] account '{self.label}' refresh failed: {resp.status_code} {resp.text[:200]}")
+                    return False
+            except Exception as e:
+                print(f"[codex] account '{self.label}' refresh error: {e}")
+                return False
 
     def _save_tokens(self):
         if not self.auth_file:
             return
         try:
-            with open(self.auth_file) as f:
-                data = json.load(f)
-            data["tokens"]["access_token"] = self.access_token
-            data["tokens"]["refresh_token"] = self.refresh_token
+            # 기존 파일 읽어서 업데이트 (다른 필드 보존)
+            try:
+                with open(self.auth_file) as f:
+                    data = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                data = {}
+
+            data["tokens"] = {
+                "access_token": self.access_token,
+                "refresh_token": self.refresh_token,
+            }
+            data["expires_at"] = self.expires_at
             data["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+
             with open(self.auth_file, "w") as f:
                 json.dump(data, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[codex] account '{self.label}' save error: {e}")
 
     def build_headers(self):
-        self.refresh_if_needed()
+        self.ensure_valid_token()
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.access_token}",
@@ -104,6 +139,29 @@ class CodexClient:
         self._index = 0
         self._lock = threading.Lock()
         self._load_accounts()
+        self._start_keepalive()
+
+    def _start_keepalive(self):
+        """백그라운드에서 주기적으로 토큰 갱신. 서버가 오래 유휴 상태여도 토큰이 만료되지 않도록 함."""
+        if not self._accounts:
+            return
+
+        def _loop():
+            while True:
+                time.sleep(KEEPALIVE_INTERVAL)
+                for acc in self._accounts:
+                    if not acc.refresh_token:
+                        continue
+                    remaining = acc.expires_at - time.time()
+                    if remaining < KEEPALIVE_INTERVAL + REFRESH_MARGIN:
+                        print(f"[codex] keepalive: refreshing '{acc.label}' (expires in {int(remaining)}s)")
+                        acc._do_refresh()
+                    else:
+                        print(f"[codex] keepalive: '{acc.label}' OK (expires in {int(remaining)}s)")
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+        print(f"[codex] keepalive started (interval={KEEPALIVE_INTERVAL}s)")
 
     def _load_accounts(self):
         # 1. Multiple auth files (comma-separated)
@@ -125,7 +183,9 @@ class CodexClient:
         acc = self._load_from_file(auth_file, "default")
         if acc:
             self._accounts.append(acc)
-            print("[codex] 1 account loaded")
+            print(f"[codex] 1 account loaded from {auth_file}")
+        else:
+            print(f"[codex] WARNING: auth file not found or invalid: {auth_file}")
 
     @staticmethod
     def _load_from_file(path, label):
@@ -133,14 +193,25 @@ class CodexClient:
             with open(path) as f:
                 data = json.load(f)
             tokens = data.get("tokens", {})
+            access_token = tokens.get("access_token")
+            refresh_token = tokens.get("refresh_token")
+            if not access_token:
+                print(f"[codex] auth file has no access_token ({path})")
+                return None
+            # expires_at: 파일에 저장된 값 사용
+            expires_at = data.get("expires_at")
             return _CodexAccount(
                 label=label,
-                access_token=tokens.get("access_token"),
-                refresh_token=tokens.get("refresh_token"),
+                access_token=access_token,
+                refresh_token=refresh_token,
                 auth_file=path,
+                expires_at=expires_at,
             )
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"[codex] auth load error ({path}): {e}")
+        except FileNotFoundError:
+            print(f"[codex] auth file not found: {path}")
+            return None
+        except json.JSONDecodeError as e:
+            print(f"[codex] auth file invalid JSON ({path}): {e}")
             return None
 
     def _next_account(self):
@@ -158,11 +229,17 @@ class CodexClient:
     def stream(self, body):
         acc = self._next_account()
         if not acc:
-            yield "error", {"error": "No codex accounts configured"}
+            yield "error", {"error": "No codex accounts configured. Check CODEX_AUTH_FILE or CODEX_AUTH_FILES env var."}
             return
 
         headers = acc.build_headers()
         resp = requests.post(CODEX_API_URL, headers=headers, json=body, stream=True, timeout=300)
+
+        # 401 → 토큰 갱신 후 재시도 (1회)
+        if resp.status_code == 401 and acc.force_refresh():
+            print(f"[codex] 401 received, retrying with refreshed token (account '{acc.label}')")
+            headers = acc.build_headers()
+            resp = requests.post(CODEX_API_URL, headers=headers, json=body, stream=True, timeout=300)
 
         if not resp.ok:
             error_text = resp.text[:500]
